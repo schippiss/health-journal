@@ -60,11 +60,15 @@ function syncPrompt() {
 function render() {
     if (!panel || !world) return;
     const scroll = panel.querySelector('.qh-content')?.scrollTop || 0;
+    const shellScroll = panel.querySelector('.qh-shell')?.scrollTop || 0;
+    const injuryOpen = panel.querySelector('.qh-injury-form')?.open;
     panel.dataset.theme = settings.theme; panel.dataset.density = settings.density;
     panel.style.setProperty('--qh-size', `${clamp(settings.fontSize, 13, 20, 14)}px`);
     if (/^#[a-f\d]{6}$/i.test(settings.accent || '')) panel.style.setProperty('--qh-accent', settings.accent); else panel.style.removeProperty('--qh-accent');
     panel.innerHTML = view({ p: current(), world, people: people(), target, tab, zone, back, notice, editor, ctx: ctx(), settings, record, sourceList, chosenSources, proposals, busy, bookChoice, names: names(), messages: messages() });
     panel.querySelector('.qh-content').scrollTop = scroll;
+    panel.querySelector('.qh-shell').scrollTop = shellScroll;
+    if (injuryOpen && panel.querySelector('.qh-injury-form')) panel.querySelector('.qh-injury-form').open = true;
     if (busy) panel.querySelectorAll('[data-action="ai-scan"],[data-action="ai-genetics"],[data-action="sources"]').forEach(el => el.disabled = true);
 }
 function notify(text) { notice = text; const el = panel?.querySelector('.qh-status'); if (el) el.textContent = text; }
@@ -87,9 +91,9 @@ async function ai(generated) {
 async function click(e) {
     const el = e.target.closest('button,[data-zone]'); if (!el) return;
     try {
-        if (el.dataset.tab) { tab = el.dataset.tab; editor = null; render(); panel.querySelector('.qh-content').scrollTop = 0; return; }
+        if (el.dataset.tab) { tab = el.dataset.tab; editor = null; render(); panel.querySelector('.qh-content').scrollTop = 0; panel.querySelector('.qh-shell').scrollTop = 0; return; }
         if (el.dataset.person) { target = el.dataset.person; sourceList = []; proposals = []; editor = null; notice = ''; render(); return; }
-        if (el.dataset.zone) { zone = el.dataset.zone; render(); return; }
+        if (el.dataset.zone) { zone = el.dataset.zone; render(); const form = panel.querySelector('.qh-injury-form'); if (form) form.open = true; return; }
         if (el.dataset.theme) { settings.theme = el.dataset.theme; settings.accent = ''; save(); render(); return; }
         const p = current(); if (!p) return;
         if (el.dataset.heal) { const list = clone(p.injuries), i = list.find(x => x.id === el.dataset.heal); i.healed = !i.healed; if (!i.healed) i.start = world.day; patch({ injuries: list }, 'Изменено заживление'); }
@@ -187,6 +191,10 @@ function positionLaunch() {
 }
 function fitViewport() {
     if (!panel) return;
+    // Safari pans its visual viewport while editing. Do not chase that pan
+    // with the fixed panel: doing so moves the focused field again.
+    const editing = panel.contains(document.activeElement) && document.activeElement.matches('input:not([type=checkbox]):not([type=button]),textarea');
+    if (editing) return;
     const viewport = window.visualViewport;
     const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
     const x = viewport?.offsetLeft || 0, y = viewport?.offsetTop || 0;
@@ -219,6 +227,7 @@ async function init() {
     if (!loadStory()) return;
     panel = document.createElement('section'); panel.id = 'qh-panel'; panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Досье здоровья'); document.body.append(panel);
     panel.addEventListener('click', click); panel.addEventListener('change', change);
+    panel.addEventListener('focusout', () => setTimeout(fitViewport, 180));
     panel.addEventListener('input', e => { if (e.target.dataset.proposal !== undefined) proposals[Number(e.target.dataset.proposal)].text = e.target.value; if (e.target.dataset.field && e.target.tagName === 'TEXTAREA') editField(e.target); });
     panel.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; launch.focus(); } if (e.target.dataset.zone && ['Enter', ' '].includes(e.key)) { e.preventDefault(); zone = e.target.dataset.zone; render(); panel.querySelector(`[data-zone="${zone}"]`)?.focus(); } });
     launch = document.createElement('button'); launch.id = 'qh-launch'; launch.title = 'Досье здоровья · перемещение мышью, пальцем или Alt + стрелки'; launch.setAttribute('aria-label', 'Открыть досье здоровья'); launch.innerHTML = '<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 33C15 29 5 22 5 14C5 5 16 4 20 11C24 4 35 5 35 14C35 22 25 29 20 33Z" fill="currentColor"/><g transform="rotate(-35 20 20)"><rect x="9" y="15" width="23" height="10" rx="3" fill="#f3ead7" stroke="#43554a"/><path d="M17 16v8m7-8v8" stroke="#788576"/><circle cx="13" cy="20" r="1" fill="#788576"/><circle cx="28" cy="20" r="1" fill="#788576"/></g></svg>'; document.body.append(launch); positionLaunch(); setupDrag();

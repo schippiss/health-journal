@@ -21,6 +21,7 @@ export function normalize(value = {}) {
     for (const k of ['conditions', 'allergies', 'traits', 'notes']) p[k] = str(value[k]);
     p.age = value.age !== '' && value.age != null && Number.isFinite(Number(value.age)) ? String(Math.round(clamp(value.age, 0, 9999))) : '';
     p.ageDay = clamp(value.ageDay, 0, 1000000); p.sex = ['male', 'female', 'neutral'].includes(value.sex) ? value.sex : 'neutral';
+    p.gender = ['male', 'female', 'unknown'].includes(value.gender) ? value.gender : 'unknown';
     p.injuries = (Array.isArray(value.injuries) ? value.injuries : []).filter(x => x && Object.hasOwn(ZONES, x.zone)).slice(0, 60).map((x, i) => ({ id: str(x.id, 100) || `injury-${i}`, zone: x.zone, text: str(x.text, 500), severity: ['mild', 'medium', 'severe'].includes(x.severity) ? x.severity : 'mild', healed: !!x.healed, start: clamp(x.start, 0, 1000000), duration: x.duration === null ? null : clamp(x.duration, .1, 3650, 7) }));
     p.rules = (Array.isArray(value.rules) ? value.rules : []).filter(x => x && (x.kind === 'custom' || Object.hasOwn(RULES, x.kind))).slice(0, 30).map((x, i) => {
         const def = RULES[x.kind] || RULES.migraine;
@@ -35,14 +36,14 @@ export function normalize(value = {}) {
 export function ruleFrom(kind, id) { return normalize({ rules: [{ kind, id, ...RULES[kind], enabled: true }] }).rules[0]; }
 export function ageAt(p, day) { return p.age === '' ? '' : Number(p.age) + Math.floor(Math.max(0, day - p.ageDay) / 365); }
 export function cycleAt(p, day) {
-    if (!p.cycle.enabled || p.pregnancy.active) return null;
+    if (p.gender === 'male' || !p.cycle.enabled || p.pregnancy.active) return null;
     const c = p.cycle, index = ((day - c.startDay) % c.length + c.length) % c.length;
     const ovulation = c.length - 14;
     const fertile = index >= ovulation - 5 && index <= ovulation + 1;
     return { day: Math.floor(index) + 1, fertile, phase: index < c.bleeding ? 'Менструация' : fertile ? 'Предполагаемое фертильное окно' : index < ovulation ? 'Фолликулярная фаза' : 'Лютеиновая фаза', chanceFactor: fertile ? Math.max(.2, 1 - Math.abs(index - ovulation) * .14) : .015 };
 }
 export function pregnancyAt(p, day) {
-    if (!p.pregnancy.active) return null;
+    if (p.gender === 'male' || !p.pregnancy.active) return null;
     const days = p.pregnancy.gestationDays + Math.max(0, day - p.pregnancy.atDay), week = Math.floor(days / 7);
     const stage = days < 14 ? 'Первые две акушерские недели: расчётный период до зачатия.' : days < 28 ? 'Ранний этап после зачатия; заметных симптомов может не быть.' : days < 56 ? 'Закладываются основные органы; возможны утомляемость и тошнота, но не обязательны.' : days < 98 ? 'Продолжается формирование и развитие органов; самочувствие индивидуально.' : days < 154 ? 'Рост плода; в этом периоде могут стать заметны шевеления.' : days < 196 ? 'Созревание органов, движения становятся ощутимее.' : days < 259 ? 'Набор массы и дальнейшее созревание; возможна повышенная утомляемость.' : 'Поздний срок; дальнейшее развитие и роды определяются сюжетом вручную.';
     return { days, week, remainder: Math.floor(days % 7), remaining: Math.max(0, 280 - Math.floor(days)), stage, symptomsPossible: days >= 28 };
@@ -93,7 +94,7 @@ export function applyEvent(world, event, options = {}, source = 'manual') {
         const severity = ['mild', 'medium', 'severe'].includes(event.severity) ? event.severity : 'mild';
         p.injuries.push({ id, zone: event.zone, text: str(event.text, 500), severity, healed: false, start: world.day, duration: severity === 'severe' ? null : clamp(event.duration, .1, 3650, severity === 'medium' ? 14 : 5) }); log(world, event.who, `Травма: ${event.text.slice(0, 120)}`);
     }
-    if (event.type === 'exposure' && p.pregnancy.enabled && !p.pregnancy.active && ageAt(p, world.day) >= 18 && event.unprotected === true && event.conceptionPossible === true) {
+    if (event.type === 'exposure' && p.gender !== 'male' && p.pregnancy.enabled && !p.pregnancy.active && ageAt(p, world.day) >= 18 && event.unprotected === true && event.conceptionPossible === true) {
         const id = str(event.id, 100) || source;
         if (p.exposureIds.includes(id)) return; p.exposureIds.push(id);
         const cycle = cycleAt(p, world.day);

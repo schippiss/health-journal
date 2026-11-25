@@ -1,4 +1,14 @@
 @font-face { font-family:QHCaveat; src:url('assets/fonts/Caveat.ttf') format('truetype'); font-weight:400; font-display:swap; }
+#qh-panel .qh-cycle-strip { margin-bottom:16px; }
+#qh-panel .qh-cycle-strip button { border:0; padding:3px 0; text-align:left; font-size:12px; }
+#qh-panel .qh-cycle-dots { display:flex; flex-wrap:wrap; gap:5px; padding-top:5px; }
+#qh-panel .qh-cycle-dots span { width:15px; height:15px; border-radius:50%; background:#c9d4dd; }
+#qh-panel .qh-cycle-dots .bleeding { background:#d9b7bd; }
+#qh-panel .qh-cycle-dots .today { background:var(--qh-pen); color:white; outline:2px solid var(--qh-paper); box-shadow:0 0 0 1px var(--qh-pen); text-align:center; font:10px/15px sans-serif; }
+#qh-panel .qh-injury-form { grid-column:1 / -1; width:100%; }
+#qh-panel .qh-injury-form summary { font-size:12px; }
+#qh-panel .qh-injury-form label { margin:8px 0; }
+#qh-panel .qh-current { margin-top:18px; }
 /* Contain the window independently of host theme sizing and flex defaults. */
 #qh-panel { box-sizing:border-box; min-width:0; min-height:0; max-width:none; max-height:none; margin:0; padding:0; }
 #qh-panel .qh-shell { box-sizing:border-box; min-height:0; min-width:0; width:100%; max-height:100%; flex-shrink:0; }
