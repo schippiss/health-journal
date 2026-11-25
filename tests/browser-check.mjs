@@ -1,0 +1,45 @@
+import { writeFile, mkdir } from 'node:fs/promises';
+const pages = await (await fetch('http://127.0.0.1:9224/json')).json();
+const page = pages.find(p => p.type === 'page' && (p.url === 'about:blank' || p.url.includes('127.0.0.1:8765')));
+if (!page) throw new Error('Open a dedicated debug browser on port 9224.');
+const ws = new WebSocket(page.webSocketDebuggerUrl); await new Promise(r => ws.addEventListener('open', r, { once: true }));
+let seq = 0; const pending = new Map(), errors = [];
+ws.addEventListener('message', e => { const m = JSON.parse(e.data); if (m.id) { const cb = pending.get(m.id); pending.delete(m.id); if (m.error) cb?.reject(m.error); else cb?.resolve(m.result); } if (m.method === 'Runtime.exceptionThrown') errors.push(m.params.exceptionDetails.text + ': ' + m.params.exceptionDetails.exception?.description); });
+const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
+async function evaluate(expression) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text); return r.result.value; }
+const pause = ms => new Promise(r => setTimeout(r, ms));
+const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+const value = (selector, v) => evaluate(`{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(v)};e.dispatchEvent(new Event('change',{bubbles:true}));}`);
+const assert = (ok, text) => { if (!ok) throw new Error(text); console.log('PASS', text); };
+await send('Runtime.enable'); await send('Page.enable');
+await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 1000, deviceScaleFactor: 1, mobile: false });
+await send('Page.navigate', { url: 'http://127.0.0.1:8765/demo.html?demo' }); await pause(800);
+await evaluate("localStorage.removeItem('qh-demo-v2')"); await send('Page.reload'); await pause(600);
+assert(await evaluate("!!document.querySelector('#qh-panel .qh-shell')"), 'demo renders');
+await evaluate('document.fonts.ready.then(()=>true)');
+await mkdir('previews', { recursive: true });
+await writeFile('previews/desktop.png', Buffer.from((await send('Page.captureScreenshot')).data, 'base64'));
+await value('[data-field="notes"]', '<script>alert(1)</script> заметка');
+await value('#qh-injury', 'Саднящий укус'); await click('[data-action="injury"]');
+assert(await evaluate("document.querySelectorAll('[data-heal]').length===1"), 'injury added');
+await click('[data-action="flip"]'); assert(await evaluate("!!document.querySelector('[data-zone=" + '"buttocks"' + "]')"), 'back silhouette');
+await click('[data-tab="cycle"]'); await click('[data-field="cycle.enabled"]'); await click('[data-action="pregnancy-manual"]'); await value('#qh-weeks', '8'); await click('[data-action="editor-save"]');
+assert(await evaluate("document.querySelector('.qh-content').textContent.includes('недель + 0')"), 'manual pregnancy');
+await click('[data-tab="scan"]'); await click('[data-action="sources"]'); await pause(200); await click('[data-action="local-scan"]');
+assert(await evaluate("document.querySelectorAll('[data-accept]').length>0"), 'card and embedded book search');
+await click('[data-tab="settings"]');
+for (const theme of ['paper','wine','night','botanical']) { await click(`[data-theme="${theme}"]`); assert(await evaluate(`document.querySelector('#qh-panel').dataset.theme==='${theme}'`), 'theme '+theme); }
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+for (const tab of ['dossier','illness','cycle','scan','history','settings']) { await click(`[data-tab="${tab}"]`); assert(await evaluate("document.querySelector('.qh-content').scrollWidth<=document.querySelector('.qh-content').clientWidth+1"), 'no horizontal overflow '+tab); }
+await click('[data-tab="dossier"]'); await writeFile('previews/mobile.png', Buffer.from((await send('Page.captureScreenshot')).data, 'base64'));
+await send('Page.reload'); await pause(500); assert(await evaluate("document.querySelector('[data-field=" + '"notes"' + "]').value.includes('<script>')"), 'escaped notes persist after reload');
+assert(errors.length === 0, 'no browser exceptions: '+errors.join(';'));
+await click('[data-action="person-add"]');
+await value('#qh-new-name', 'Child NPC'); await value('#qh-new-age', '5'); await click('[data-action="editor-save"]');
+assert(await evaluate("document.querySelector('.qh-name-tabs [aria-selected=true]').textContent.includes('Child NPC')"), 'custom persona tab created');
+await value('[data-field="notes"]', 'Separate health profile');
+await click('[data-person="char:alex.png"]');
+assert(await evaluate("!document.querySelector('[data-field=notes]').value.includes('Separate health profile')"), 'custom profile isolated');
+await send('Page.reload'); await pause(500);
+assert(await evaluate("[...document.querySelectorAll('[data-person]')].some(e=>e.textContent.includes('Child NPC'))"), 'custom tab persists');
+ws.close();
