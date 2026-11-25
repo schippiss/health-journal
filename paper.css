@@ -1,4 +1,11 @@
 @font-face { font-family:QHCaveat; src:url('assets/fonts/Caveat.ttf') format('truetype'); font-weight:400; font-display:swap; }
+/* Contain the window independently of host theme sizing and flex defaults. */
+#qh-panel { box-sizing:border-box; min-width:0; min-height:0; max-width:none; max-height:none; margin:0; padding:0; }
+#qh-panel .qh-shell { box-sizing:border-box; min-height:0; min-width:0; width:100%; max-height:100%; flex-shrink:0; }
+#qh-panel .qh-content { min-height:0; flex:1 1 0; overflow-y:auto; overflow-x:hidden; -webkit-overflow-scrolling:touch; }
+#qh-panel .qh-shell>header,#qh-panel .qh-shell>.qh-patient,#qh-panel .qh-shell>nav,#qh-panel .qh-shell>.qh-status { flex-shrink:0; }
+#qh-panel.qh-small-viewport .qh-shell { overflow:auto; overscroll-behavior:contain; }
+#qh-panel.qh-small-viewport .qh-content { flex:1 0 auto; overflow:visible; }
 @font-face { font-family:QHOswald; src:url('assets/fonts/Oswald.ttf') format('truetype'); font-weight:500; font-display:swap; }
 #qh-panel { --qh-board:#b2b2a5; --qh-paper:#f9f9f5; --qh-bg:#f9f9f5; --qh-card:#f0f1ed; --qh-input:#fffefa; --qh-ink:#282c30; --qh-muted:#6c7275; --qh-line:#c7cbca; --qh-accent:#365a7c; --qh-pen:#254a79; --qh-warm:#9b4d4d; }
 #qh-panel[data-theme=paper] { --qh-board:#b8b5ac; --qh-paper:#fffefa; --qh-bg:#fffefa; --qh-card:#f3f1e9; --qh-input:#fffefa; --qh-ink:#30302b; --qh-muted:#727067; --qh-line:#d1cec4; --qh-accent:#535d69; --qh-pen:#284d7b; }

@@ -185,15 +185,31 @@ function positionLaunch() {
     const pos = settings.position || { x: innerWidth - 72, y: innerHeight - 88 };
     launch.style.left = `${clamp(pos.x, 8, Math.max(8, innerWidth - 56))}px`; launch.style.top = `${clamp(pos.y, 8, Math.max(8, innerHeight - 56))}px`;
 }
+function fitViewport() {
+    if (!panel) return;
+    const viewport = window.visualViewport;
+    const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+    const x = viewport?.offsetLeft || 0, y = viewport?.offsetTop || 0;
+    const mobile = width <= 640 || height <= 500;
+    panel.classList.toggle('qh-small-viewport', mobile);
+    if (mobile) {
+        // Explicit dimensions avoid inherited theme transforms and mobile vh/keyboard clipping.
+        Object.assign(panel.style, { left: `${x + 8}px`, top: `${y + 50}px`, width: `${Math.max(0, width - 16)}px`, height: `${Math.max(0, height - 60)}px`, right: 'auto', bottom: 'auto', transform: 'none' });
+    } else {
+        for (const key of ['left', 'top', 'width', 'height', 'right', 'bottom', 'transform']) panel.style.removeProperty(key);
+    }
+}
 function setupDrag() {
     let start, moved = false;
     launch.addEventListener('pointerdown', e => { if (e.button !== 0) return; const r = launch.getBoundingClientRect(); start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top }; moved = false; launch.setPointerCapture(e.pointerId); });
     launch.addEventListener('pointermove', e => { if (!start) return; const dx = e.clientX - start.x, dy = e.clientY - start.y; if (Math.hypot(dx, dy) > 6) moved = true; if (moved) { settings.position = { x: start.left + dx, y: start.top + dy }; positionLaunch(); } });
     launch.addEventListener('pointerup', () => { if (moved) save(); start = null; });
     launch.addEventListener('pointercancel', () => { start = null; moved = true; });
-    launch.addEventListener('click', () => { if (moved) { moved = false; return; } loadStory(); panel.hidden = false; render(); panel.querySelector('.qh-close').focus(); });
+    launch.addEventListener('click', () => { if (moved) { moved = false; return; } if (!panel.hidden) { panel.hidden = true; launch.setAttribute('aria-expanded', 'false'); launch.focus(); return; } loadStory(); panel.hidden = false; fitViewport(); render(); launch.setAttribute('aria-expanded', 'true'); panel.querySelector('.qh-close').focus({ preventScroll: true }); });
     launch.addEventListener('keydown', e => { if (e.altKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { e.preventDefault(); const r = launch.getBoundingClientRect(); settings.position = { x: r.left + (e.key === 'ArrowRight' ? 20 : e.key === 'ArrowLeft' ? -20 : 0), y: r.top + (e.key === 'ArrowDown' ? 20 : e.key === 'ArrowUp' ? -20 : 0) }; positionLaunch(); save(); } });
-    addEventListener('resize', positionLaunch);
+    addEventListener('resize', () => { positionLaunch(); fitViewport(); });
+    window.visualViewport?.addEventListener('resize', fitViewport);
+    window.visualViewport?.addEventListener('scroll', fitViewport);
 }
 async function init() {
     if (!ctx()?.extensionSettings || document.getElementById('qh-panel')) return;
@@ -210,6 +226,6 @@ async function init() {
     for (const name of ['CHAT_CHANGED', 'CHARACTER_EDITED', 'USER_NAME_CHANGED', 'PERSONA_CHANGED']) if (events[name]) c.eventSource?.on(events[name], () => { sourceList = []; proposals = []; editor = null; notice = ''; loadStory(); if (!panel.hidden) render(); });
     for (const name of ['CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED']) if (events[name]) c.eventSource?.on(events[name], () => { loadStory(); save(); if (!panel.hidden) render(); });
     if (events.GENERATION_AFTER_COMMANDS) c.eventSource?.on(events.GENERATION_AFTER_COMMANDS, () => loadStory());
-    save(); if (demo) { panel.hidden = false; render(); }
+    fitViewport(); save(); if (demo) { panel.hidden = false; render(); }
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
