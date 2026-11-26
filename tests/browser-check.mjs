@@ -8,7 +8,7 @@ ws.addEventListener('message', e => { const m = JSON.parse(e.data); if (m.id) { 
 const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params })); });
 async function evaluate(expression) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text); return r.result.value; }
 const pause = ms => new Promise(r => setTimeout(r, ms));
-const click = selector => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+const click = selector => evaluate(`{const s=${JSON.stringify(selector)}; if(!document.querySelector(s) && s.startsWith('[data-tab=')) document.querySelector('[data-tab="dossier"]').click(); document.querySelector(s).click();}`);
 const value = (selector, v) => evaluate(`{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(v)};e.dispatchEvent(new Event('change',{bubbles:true}));}`);
 const assert = (ok, text) => { if (!ok) throw new Error(text); console.log('PASS', text); };
 await send('Runtime.enable'); await send('Page.enable');
@@ -16,22 +16,41 @@ await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 1000, de
 await send('Page.navigate', { url: 'http://127.0.0.1:8765/demo.html?demo' }); await pause(800);
 await evaluate("localStorage.removeItem('qh-demo-v2')"); await send('Page.reload'); await pause(600);
 assert(await evaluate("!!document.querySelector('#qh-panel .qh-shell')"), 'demo renders');
+assert(await evaluate("document.querySelector('.qh-stamp').textContent.includes('День 1')"), 'story begins on day one');
+assert(await evaluate("!!document.querySelector('.qh-blank-fields:not([open]) [data-field=notes]')"), 'empty dossier fields start collapsed');
 await evaluate('document.fonts.ready.then(()=>true)');
 await mkdir('previews', { recursive: true });
 await writeFile('previews/desktop.png', Buffer.from((await send('Page.captureScreenshot')).data, 'base64'));
+await click('.qh-blank-fields summary');
 await value('[data-field="notes"]', '<script>alert(1)</script> заметка');
 await value('#qh-injury', 'Саднящий укус'); await click('[data-action="injury"]');
 assert(await evaluate("document.querySelectorAll('[data-heal]').length===1"), 'injury added');
 await click('[data-action="flip"]'); assert(await evaluate("!!document.querySelector('[data-zone=" + '"buttocks"' + "]')"), 'back silhouette');
 await click('[data-tab="cycle"]'); await click('[data-field="cycle.enabled"]'); await click('[data-action="pregnancy-manual"]'); await value('#qh-weeks', '8'); await click('[data-action="editor-save"]');
 assert(await evaluate("document.querySelector('.qh-content').textContent.includes('недель + 0')"), 'manual pregnancy');
+await click('[data-tab="illness"]');
+await click('[data-illness-action="start"]');
+await value('[data-treatment-note]', 'Лечение по сюжету');
+await click('[data-illness-action="treat"]');
+const remaining = await evaluate("document.querySelector('.qh-cards small').textContent");
+await click('[data-rule-edit]');
+await value('#qe-name', 'Тестовое состояние');
+await click('[data-action="editor-save"]');
+assert(await evaluate("document.querySelector('.qh-cards small').textContent") === remaining, 'editing illness preserves treatment');
+await click('[data-tab="history"]');
+assert(await evaluate("document.querySelector('.qh-content').textContent.includes('Лечение по сюжету')"), 'treatment note appears in history');
 await click('[data-tab="scan"]'); await click('[data-action="sources"]'); await pause(200); await click('[data-action="local-scan"]');
 assert(await evaluate("document.querySelectorAll('[data-accept]').length>0"), 'card and embedded book search');
 await click('[data-tab="settings"]');
 for (const theme of ['paper','wine','night','botanical']) { await click(`[data-theme="${theme}"]`); assert(await evaluate(`document.querySelector('#qh-panel').dataset.theme==='${theme}'`), 'theme '+theme); }
 await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
 for (const tab of ['dossier','illness','cycle','scan','history','settings']) { await click(`[data-tab="${tab}"]`); assert(await evaluate("document.querySelector('.qh-content').scrollWidth<=document.querySelector('.qh-content').clientWidth+1"), 'no horizontal overflow '+tab); }
-await click('[data-tab="dossier"]'); await writeFile('previews/mobile.png', Buffer.from((await send('Page.captureScreenshot')).data, 'base64'));
+await click('[data-tab="dossier"]');
+await evaluate(`{const f=document.querySelector('[data-field=notes]'); f.value='Длинная запись '.repeat(80); f.dispatchEvent(new Event('input',{bubbles:true}));}`);
+assert(await evaluate("{const f=document.querySelector('[data-field=notes]');f.clientHeight>=f.scrollHeight && f.clientHeight>100}"), 'long mobile notes expand');
+await value('[data-field="notes"]', '<script>alert(1)</script> заметка');
+await click('[data-tab="dossier"]');
+await writeFile('previews/mobile.png', Buffer.from((await send('Page.captureScreenshot')).data, 'base64'));
 await send('Page.reload'); await pause(500); assert(await evaluate("document.querySelector('[data-field=" + '"notes"' + "]').value.includes('<script>')"), 'escaped notes persist after reload');
 assert(errors.length === 0, 'no browser exceptions: '+errors.join(';'));
 await click('[data-action="person-add"]');
@@ -42,4 +61,24 @@ await click('[data-person="char:alex.png"]');
 assert(await evaluate("!document.querySelector('[data-field=notes]').value.includes('Separate health profile')"), 'custom profile isolated');
 await send('Page.reload'); await pause(500);
 assert(await evaluate("[...document.querySelectorAll('[data-person]')].some(e=>e.textContent.includes('Child NPC'))"), 'custom tab persists');
+await click('#qh-launch'); assert(await evaluate("document.querySelector('#qh-panel').hidden"), 'heart closes open panel');
+await click('#qh-launch'); assert(await evaluate("!document.querySelector('#qh-panel').hidden"), 'heart reopens panel');
+for (const [width,height] of [[320,568],[390,844],[390,400],[844,390]]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor:1, mobile:true }); await pause(150);
+    assert(await evaluate(`{ const r=document.querySelector('#qh-panel').getBoundingClientRect(); r.left>=0 && r.top>=0 && r.right<=${width}+1 && r.bottom<=${height}+1; }`), `panel within viewport ${width}x${height}`);
+    assert(await evaluate("{const s=document.querySelector('.qh-shell');s.scrollTop=s.scrollHeight; const f=document.querySelector('footer').getBoundingClientRect(),r=s.getBoundingClientRect();f.bottom<=r.bottom+1;}"), `footer reachable ${width}x${height}`);
+}
+await click('[data-person="char:alex.png"]');
+await click('[data-action="genome"]');
+await click('[data-person^="user:"]');
+await click('[data-action="genome"]');
+await click('[data-person^="rp:"]');
+await value('#qh-parent-first', 'char:alex.png');
+const otherParent = await evaluate("document.querySelector('[data-person^=\"user:\"]').dataset.person");
+await value('#qh-parent-second', otherParent);
+await click('[data-action="genome"]');
+const inherited = await evaluate("document.querySelector('.qh-genetics').textContent");
+await send('Page.reload'); await pause(500); await click('[data-person^="rp:"]');
+assert(await evaluate("document.querySelector('.qh-genetics').textContent") === inherited && !await evaluate("!!document.querySelector('[data-action=genome]')"), 'inherited profile survives reload and cannot be rerolled');
+assert(errors.length === 0, 'all interactive scenarios finished without browser exceptions');
 ws.close();

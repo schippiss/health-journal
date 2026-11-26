@@ -1,4 +1,4 @@
-import { freshProfile, normalize, ruleFrom, clone, clamp, replay, pregnancyAt, ageAt, summary, FACTORS } from './engine.js';
+import { freshProfile, normalize, ruleFrom, clone, clamp, replay, applyEvent, pregnancyAt, ageAt, summary, inheritedRisk, randomAt, GENETIC_TRAITS, FACTORS, ZONES } from './engine.js';
 import { sources, requestJSON, validateCandidates } from './integration.js';
 import { cardCandidates, generateTraits } from './core.js';
 import { view } from './views.js';
@@ -19,7 +19,7 @@ function people() {
 const person = () => people().find(p => p.key === target);
 const current = () => world?.profiles[target];
 const names = () => Object.fromEntries(people().map(p => [p.key, p.name]));
-function messages() { return (ctx().chat || []).map((m, i) => ({ id: m.extra?.quietHealthId || `old-${i}`, text: m.mes || '', user: !!m.is_user, skip: record?.baselineIds?.includes(m.extra?.quietHealthId) || !!m.is_system })); }
+function messages() { const baseline = new Set(record?.baselineIds); return (ctx().chat || []).map((m, i) => ({ id: m.extra?.quietHealthId || `old-${i}`, text: m.mes || '', user: !!m.is_user, system: !!m.is_system, skip: baseline.has(m.extra?.quietHealthId) || !!m.is_system })); }
 function saveChatLater() {
     clearTimeout(saveTimer); const c = ctx(), id = c.chatId;
     saveTimer = setTimeout(() => { if (ctx().chatId !== id) return; Promise.resolve(c.saveChat?.()).catch(e => notify(`Не удалось сохранить чат: ${e.message}`)); }, 600);
@@ -32,7 +32,9 @@ function assignIds() {
 function loadStory() {
     const c = ctx(); if (!c?.chatMetadata) return false;
     assignIds(); record = c.chatMetadata[KEY];
-    if (!record || record.version !== 2) record = c.chatMetadata[KEY] = { version: 2, seed: uid(), startDay: 0, base: {}, manual: [], baselineIds: (c.chat || []).map(m => m.extra.quietHealthId), options: { autoTime: false, autoEvents: false, ordinary: true, chronic: true, dangerous: false, fatal: false, intensity: 1 } };
+    if (!record || record.version !== 2) record = c.chatMetadata[KEY] = { version: 2, seed: uid(), startDay: 0, base: {}, manual: [], baselineIds: (c.chat || []).map(m => m.extra.quietHealthId), options: { autoTime: true, autoEvents: true, ordinary: true, chronic: true, dangerous: false, fatal: false, intensity: 1 } };
+    record.options.manualIllness = true;
+    if (!record.options.illnessSince && !record.options.legacyIllnessMessages) record.options.legacyIllnessMessages = messages().map(m => m.id);
     for (const p of people()) if (!Object.hasOwn(record.base, p.key)) {
         const legacy = settings.profiles?.[p.key] || (p.user && settings.profiles?.[`user:${c.name1}`]);
         record.base[p.key] = normalize(legacy || freshProfile());
@@ -41,12 +43,24 @@ function loadStory() {
     if (!people().some(p => p.key === target)) target = people()[0]?.key || '';
     recalc(); return true;
 }
-function recalc() { world = replay(record, messages(), record.options); syncPrompt(); }
+function recalc() {
+    world = replay(record, messages(), record.options);
+    for (const [key, profile] of Object.entries(world.profiles)) {
+        if (Object.hasOwn(settings.genomes, key)) profile.genome = settings.genomes[key];
+    }
+    syncPrompt();
+}
 function save() { ctx().saveSettingsDebounced?.(); ctx().saveMetadataDebounced?.(); saveChatLater(); }
 function addOperation(event, label = 'Ручная правка', merge = '') {
-    const anchor = messages().at(-1)?.id || 'start', last = record.manual.at(-1);
-    if (merge && last?.merge === merge && last.anchor === anchor && !last.disabled) last.event = clone(event);
-    else record.manual.push({ id: uid(), anchor, event: clone(event), label, merge, disabled: false });
+    const anchor = ctx().chat?.at(-1)?.extra?.quietHealthId || 'start', last = record.manual.at(-1);
+    if (merge && last?.merge === merge && last.anchor === anchor && !last.disabled && event.type === 'patch') {
+        last.event = clone(event);
+        applyEvent(world, event);
+        syncPrompt();
+        save();
+        return;
+    }
+    record.manual.push({ id: uid(), anchor, event: clone(event), label, merge, disabled: false });
     recalc(); save();
 }
 function patch(value, label, merge = '') { addOperation({ type: 'patch', who: target, value }, label, merge); }
@@ -54,22 +68,38 @@ function syncPrompt() {
     if (!world) return;
     const visible = { ...world, profiles: Object.fromEntries(people().map(p => [p.key, world.profiles[p.key]]).filter(([, p]) => p)) };
     ctx().setExtensionPrompt?.(PROMPT, settings.enabled ? summary(visible, names(), settings.limit) : '', 1, 1, false, 0);
-    const instruction = record.options.autoTime ? `Health journal: current absolute story day=${world.day.toFixed(3)}. At the END of your normal reply add one HTML comment <!--QH:{"day":${world.day.toFixed(3)},"events":[]}-->. day is absolute, may be fractional (1 hour=1/24 day), never add a user timeskip twice. Advance only if story time passes. Character keys: ${JSON.stringify(names())}. ${record.options.autoEvents ? 'Only explicit NEW events, not guesses/plans/negations/memories/repetitions: {"type":"injury","who":"key","zone":"head|chest|abdomen|back|buttocks|leftArm|rightArm|leftLeg|rightLeg","text":"short Russian description","severity":"mild|medium|severe","duration":5}; {"type":"factor","who":"key","factor":"stress|sleepLoss|exertion|allergen|infection|rest","days":1}; {"type":"exposure","who":"key","unprotected":true,"conceptionPossible":true} only for explicitly established conception-capable unprotected intercourse between adults. No diagnoses, pregnancies or random disease events in this marker.' : 'Keep events empty.'}` : '';
+    const wounds = Object.fromEntries(Object.entries(visible.profiles).map(([key, p]) => [key, p.injuries.filter(i => !i.healed).slice(-10).map(({ id, zone, text }) => ({ id, zone, text: text.slice(0, 100) }))]));
+    const diagnoses = Object.fromEntries(Object.entries(visible.profiles).map(([key, p]) => [key, p.rules.map(({ id, name, active }) => ({ id, name, active }))]));
+    const instruction = (record.options.autoTime || record.options.autoEvents) ? `Health journal: current absolute story day=${world.day.toFixed(3)}. At the END of your normal reply add one HTML comment <!--QH:{"v":2,"day":${world.day},"timeQuote":"","events":[]}-->. day is absolute, may be fractional (1 hour=1/24 day), never add a user timeskip twice. ${record.options.autoTime ? 'Keep elapsed day unchanged in continuous dialogue. Advance only on an explicit elapsed interval or transition such as next morning. timeQuote must copy the exact words establishing that transition from this exchange. The supplied elapsed day already includes standalone user time skips.' : 'Keep day unchanged.'} Character keys: ${JSON.stringify(names())}. ${record.options.autoEvents ? 'Read the latest user RP turn and your reply as one scene. Always record each newly established physical injury once, including injuries stated only by the user. Attribute it to the injured character, not the actor. Do not invent injuries, duplicate existing wounds, or record guesses, threats, memories or negations. Event examples: {"type":"injury","who":"key","zone":"head|chest|abdomen|back|buttocks|leftArm|rightArm|leftLeg|rightLeg","text":"short Russian description","quote":"short exact quote from the scene","severity":"mild|medium|severe","duration":5}; {"type":"factor","who":"key","factor":"stress|sleepLoss|exertion|allergen|infection|rest","days":1}; {"type":"exposure","who":"key","unprotected":true,"conceptionPossible":true} only for explicitly established conception-capable unprotected intercourse between adults. For an explicitly healed wound use {"type":"healed","who":"key","injury":"existing wound id"}. Record health already established in the RP; never invent diagnoses from symptoms. If the RP explicitly says someone fell ill but gives no name, use kind custom and name Недомогание. For an illness explicitly established in the scene, actual treatment (including seeking care), or explicit recovery use {"type":"condition","action":"start|treat|recover","who":"key","kind":"cold|stomach|allergy|asthma|migraine|custom","name":"illness name in Russian","rule":"existing id if known","quote":"exact evidence"}. Link treatment to the illness being treated. If a character is explicitly receiving care for an unnamed current illness, use its existing id when unambiguous. Do not infer a cause from a symptom. Skip ambiguous attribution, planned care, and mere purchases. For newly stated enduring health facts use {"type":"fact","field":"allergies|intolerances|conditions","who":"key","text":"short Russian fact","quote":"exact evidence"}. Sort events chronologically; optional at = absolute elapsed day when an event occurs before the end of a time skip. Existing illnesses: ' + JSON.stringify(diagnoses) + '. Active wounds: ' + JSON.stringify(wounds) : 'Keep events empty.'}` : '';
     ctx().setExtensionPrompt?.(CLOCK, instruction, 1, 0, false, 0);
 }
 function render() {
     if (!panel || !world) return;
     const scroll = panel.querySelector('.qh-content')?.scrollTop || 0;
     const shellScroll = panel.querySelector('.qh-shell')?.scrollTop || 0;
+    const geneticsOpen = panel.querySelector('.qh-genetics')?.open;
+    const blanksOpen = panel.querySelector('.qh-blank-fields')?.open;
+    const cycleOpen = panel.querySelector('.qh-cycle-strip')?.open;
     const injuryOpen = panel.querySelector('.qh-injury-form')?.open;
     panel.dataset.theme = settings.theme; panel.dataset.density = settings.density;
     panel.style.setProperty('--qh-size', `${clamp(settings.fontSize, 13, 20, 14)}px`);
     if (/^#[a-f\d]{6}$/i.test(settings.accent || '')) panel.style.setProperty('--qh-accent', settings.accent); else panel.style.removeProperty('--qh-accent');
-    panel.innerHTML = view({ p: current(), world, people: people(), target, tab, zone, back, notice, editor, ctx: ctx(), settings, record, sourceList, chosenSources, proposals, busy, bookChoice, names: names(), messages: messages() });
+    panel.innerHTML = view({ p: current(), world, people: people(), target, tab, zone, back, notice, editor, ctx: ctx(), settings, record, sourceList, chosenSources, proposals, busy, bookChoice, names: names(), messages: tab === 'history' ? messages() : [] });
     panel.querySelector('.qh-content').scrollTop = scroll;
     panel.querySelector('.qh-shell').scrollTop = shellScroll;
+    if (geneticsOpen && panel.querySelector('.qh-genetics')) panel.querySelector('.qh-genetics').open = true;
+    if (blanksOpen && panel.querySelector('.qh-blank-fields')) panel.querySelector('.qh-blank-fields').open = true;
+    if (cycleOpen && panel.querySelector('.qh-cycle-strip')) panel.querySelector('.qh-cycle-strip').open = true;
+    panel.querySelectorAll('textarea').forEach(fitText);
     if (injuryOpen && panel.querySelector('.qh-injury-form')) panel.querySelector('.qh-injury-form').open = true;
-    if (busy) panel.querySelectorAll('[data-action="ai-scan"],[data-action="ai-genetics"],[data-action="sources"]').forEach(el => el.disabled = true);
+    if (busy) panel.querySelectorAll('[data-action="ai-scan"],[data-action="ai-genetics"],[data-action="sources"],[data-action="scan-rp"]').forEach(el => el.disabled = true);
+}
+function fitText(field) {
+    if (!field.getClientRects().length) return;
+    field.style.height = '0';
+    const style = getComputedStyle(field);
+    const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+    field.style.height = `${field.scrollHeight + border}px`;
 }
 function notify(text) { notice = text; const el = panel?.querySelector('.qh-status'); if (el) el.textContent = text; }
 async function ai(generated) {
@@ -81,27 +111,78 @@ async function ai(generated) {
     busy = true; notify('Запрос через выбранный профиль…'); render();
     try {
         const instruction = generated ? `Создай 2–4 мягкие игровые предрасположенности персонажа, совместимые с фактами. Не выдавай их за диагнозы или научный генетический расчёт. ${record.options.dangerous || record.options.fatal ? 'Тяжёлые варианты допускаются только в рамках разрешённых категорий.' : 'Исключи инсульт, смертельные и тяжёлые болезни.'}` : 'Извлеки явно указанные факты здоровья выбранного персонажа. Не приписывай ему сведения других лиц, отрицания или гипотезы. Если фактов нет, верни пустой список. Сохраняй ссылки на id источника.';
-        const data = await requestJSON(ctx(), settings.connection, instruction + ' Формат {"items":[{"field":"conditions|allergies|traits|notes","text":"русский текст","source":"id источника","rule":"migraine|asthma|allergy|cold|stroke|serious или пустая строка"}]}. rule — необязательное предложение игрового правила.', { character: person()?.name, profile: current(), sources: selected, allowDangerous: !!record.options.dangerous, allowFatal: !!record.options.fatal });
+        const data = await requestJSON(ctx(), settings.connection, instruction + ' Формат {"items":[{"field":"conditions|allergies|intolerances|traits|notes","text":"русский текст","source":"id источника","rule":"migraine|asthma|allergy|cold|stomach|stroke|serious или пустая строка"}]}. rule — необязательное предложение игрового правила.', { character: person()?.name, profile: current(), sources: selected, allowDangerous: !!record.options.dangerous, allowFatal: !!record.options.fatal });
         settings.requests = (settings.requests || 0) + 1;
         if (target !== owner || record !== story) { notify('Досье изменилось во время запроса. Ответ не применён.'); return; }
         proposals = validateCandidates(data, selected, generated); candidatesOwner = owner;
         notify(proposals.length ? 'Результаты готовы. Проверьте и добавьте нужное.' : 'Подтверждённых сведений не найдено.'); save();
     } finally { busy = false; render(); }
 }
+async function scanRoleplay() {
+    if (busy) return;
+    const recentScene = () => messages().filter(m => m.text.trim() && !m.system).slice(-4);
+    const scene = recentScene();
+    if (!scene.length) throw new Error('В чате пока нет РП-текста.');
+    const story = record;
+    const owner = target;
+    busy = true;
+    notify('Проверяю последние сообщения…');
+    render();
+    try {
+        const data = await requestJSON(ctx(), settings.connection,
+            'Извлеки только явно полученные в данных сообщениях физические травмы. Не добавляй болезни. Пропусти угрозы, воспоминания, отрицания и повторы уже записанных травм. Используй ключи персонажей и зон из входных данных. Формат {"injuries":[{"who":"ключ персонажа","zone":"ключ зоны","severity":"mild|medium|severe","text":"краткая запись","quote":"точная цитата из сообщения"}]}.',
+            { characters: names(), zones: ZONES, wounds: Object.fromEntries(Object.entries(world.profiles).map(([key, p]) => [key, p.injuries.map(({ zone, text }) => ({ zone, text }))])), scene: scene.map(m => ({ user: m.user, text: m.text.split('<!--QH:')[0].slice(-4000) })) });
+        if (story !== record || owner !== target || JSON.stringify(scene) !== JSON.stringify(recentScene())) return;
+        if (!Array.isArray(data?.injuries)) throw new Error('Профиль вернул ответ без списка повреждений.');
+        const entries = data.injuries.slice(0, 20);
+        const addedIds = new Set();
+        const counts = new Map();
+        let added = 0;
+        for (const entry of entries) {
+            if (!entry || !Object.hasOwn(names(), entry.who) || !Object.hasOwn(ZONES, entry.zone)) continue;
+            const { who, zone, severity, text, quote } = entry;
+            if (typeof text !== 'string' || !text.trim() || typeof quote !== 'string' || !quote.trim()) continue;
+            const matches = scene.filter(m => m.text.split('<!--QH:')[0].slice(-4000).includes(quote));
+            if (matches.length !== 1 || quote.length > 500) continue;
+            const [message] = matches;
+            const id = `scan:${message.id}:${zone}:${Math.floor(randomAt(quote) * 4294967296)}`;
+            const wounds = world.profiles[who].injuries;
+            if (wounds.length + (counts.get(who) || 0) >= 60 || addedIds.has(who + id) || wounds.some(i => i.id === id || (!i.healed && i.zone === zone && i.text.toLowerCase() === text.trim().toLowerCase()))) continue;
+            record.manual.push({ id: uid(), anchor: message.id, label: 'Травма из РП-текста', event: { type: 'injury', id, who, zone, severity, text: text.trim().slice(0, 500), quote } });
+            addedIds.add(who + id);
+            counts.set(who, (counts.get(who) || 0) + 1);
+            added++;
+        }
+        settings.requests = (settings.requests || 0) + 1;
+        save();
+        if (added) recalc();
+        notify(added ? `Добавлено травм: ${added}` : 'Новых подтверждённых травм в последних сообщениях нет.');
+    } finally {
+        busy = false;
+        render();
+    }
+}
 async function click(e) {
     const el = e.target.closest('button,[data-zone]'); if (!el) return;
     try {
-        if (el.dataset.tab) { tab = el.dataset.tab; editor = null; render(); panel.querySelector('.qh-content').scrollTop = 0; panel.querySelector('.qh-shell').scrollTop = 0; return; }
+        if (el.dataset.tab) { tab = el.dataset.tab; notice = ''; editor = null; render(); panel.querySelector('.qh-content').scrollTop = 0; panel.querySelector('.qh-shell').scrollTop = 0; return; }
         if (el.dataset.person) { target = el.dataset.person; sourceList = []; proposals = []; editor = null; notice = ''; render(); return; }
         if (el.dataset.zone) { zone = el.dataset.zone; render(); const form = panel.querySelector('.qh-injury-form'); if (form) form.open = true; return; }
         if (el.dataset.theme) { settings.theme = el.dataset.theme; settings.accent = ''; save(); render(); return; }
         const p = current(); if (!p) return;
-        if (el.dataset.heal) { const list = clone(p.injuries), i = list.find(x => x.id === el.dataset.heal); i.healed = !i.healed; if (!i.healed) i.start = world.day; patch({ injuries: list }, 'Изменено заживление'); }
-        if (el.dataset.removeInjury) patch({ injuries: p.injuries.filter(i => i.id !== el.dataset.removeInjury) }, 'Удалено повреждение');
+        if (el.dataset.heal) { const injury = p.injuries.find(i => i.id === el.dataset.heal); addOperation({ type: 'injuryEdit', who: target, injury: injury.id, healed: !injury.healed }, 'Изменено заживление'); }
+        if (el.dataset.removeInjury) addOperation({ type: 'injuryEdit', who: target, injury: el.dataset.removeInjury, remove: true }, 'Удалено повреждение');
         if (el.dataset.editInjury) editor = { kind: 'injury', value: clone(p.injuries.find(i => i.id === el.dataset.editInjury)) };
         if (el.dataset.ruleEdit) editor = { kind: 'rule', value: clone(p.rules.find(r => r.id === el.dataset.ruleEdit)) };
         if (el.dataset.ruleDelete) patch({ rules: p.rules.filter(r => r.id !== el.dataset.ruleDelete) }, 'Удалено правило');
         if (el.dataset.ruleToggle) { const rules = clone(p.rules), r = rules.find(r => r.id === el.dataset.ruleToggle); r.active = !r.active; if (r.active) { r.onset = world.day; r.until = r.duration === null ? null : world.day + r.duration; } else { r.recovered = world.day; r.hazard = 0; r.episode++; } patch({ rules }, `Ручной эпизод: ${r.name}`); }
+        if (el.dataset.illness) {
+            const r = p.rules.find(rule => rule.id === el.dataset.illness);
+            const action = el.dataset.illnessAction;
+            if (action === 'roll' && record.options[r.category] === false) throw new Error('Включите эту категорию бросков в настройках.');
+            const treatment = action === 'treat' ? el.closest('article')?.querySelector('[data-treatment-note]')?.value.trim() : undefined;
+            addOperation({ type: 'illness', who: target, rule: r.id, action, treatment, ...(action === 'roll' && { inheritedRisk: inheritedRisk(p.genome, r.kind) }) },  `${r.name} · ${el.textContent}`);
+        }
         if (el.dataset.factor) addOperation({ type: 'factor', who: target, factor: el.dataset.factor, days: clamp(panel.querySelector('#qh-factor-days').value, .05, 30, 1) }, FACTORS[el.dataset.factor]);
         if (el.dataset.op) { const op = record.manual.find(o => o.id === el.dataset.op); op.disabled = !op.disabled; recalc(); save(); }
         if (el.dataset.ignoreMessage) { record.ignoredMessages ||= []; const id = el.dataset.ignoreMessage; record.ignoredMessages = record.ignoredMessages.includes(id) ? record.ignoredMessages.filter(v => v !== id) : [...record.ignoredMessages, id]; recalc(); save(); }
@@ -109,27 +190,46 @@ async function click(e) {
         if (el.dataset.accept !== undefined) { if (candidatesOwner !== target) throw new Error('Результат относится к другому досье.'); const item = proposals[Number(el.dataset.accept)]; patch({ [item.field]: `${p[item.field]}\n${item.text}`.trim().slice(0, 4000) }, 'Добавлено из скана / генерации'); proposals.splice(Number(el.dataset.accept), 1); }
         if (el.dataset.acceptRule !== undefined) { const item = proposals[Number(el.dataset.acceptRule)]; if (p.rules.length >= 30) throw new Error('Лимит 30 правил.'); editor = { kind: 'rule', value: ruleFrom(item.rule, uid()), isNew: true }; }
         switch (el.dataset.action) {
+            case 'scan-rp': await scanRoleplay(); return;
+            case 'genome': {
+                if (p.genome !== null) break;
+                const custom = (panel.querySelector('#qh-genetic-traits')?.value || '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 12).map(line => `custom:${line.slice(0, 100)}`);
+                const first = panel.querySelector('#qh-parent-first')?.value || '';
+                const second = panel.querySelector('#qh-parent-second')?.value || '';
+                if ((first || second) && (!first || !second || first === second)) throw new Error('Выберите двух разных родителей.');
+                const parents = [first, second].filter(Boolean).map(key => world.profiles[key]?.genome);
+                if (parents.length && custom.length) throw new Error('Для наследования используются черты родителей. Очистите поле своих черт или снимите выбор родителей.');
+                if (parents.some(genome => !Array.isArray(genome))) throw new Error('Сначала создайте игровые профили обоих родителей.');
+                const seed = uid();
+                const keys = [...new Set(parents.length ? parents.flat() : [...Object.keys(GENETIC_TRAITS), ...custom])];
+                settings.genomes[target] = keys.filter(key => {
+                    const copies = parents.filter(genome => genome.includes(key)).length;
+                    const chance = parents.length ? [0, .5, .75][copies] : .25;
+                    return randomAt(`${seed}:${key}`) < chance;
+                });
+                recalc(); save(); break;
+            }
             case 'person-add': editor = { kind: 'person', name: '', age: '' }; break;
             case 'person-edit': editor = { kind: 'person', name: person().name, age: ageAt(p, world.day), key: target }; break;
             case 'person-remove': if (person()?.custom && confirm('Убрать вкладку этой RP-персоны? Записи сохранятся в истории, но не будут передаваться в чат.')) { record.customPeople = record.customPeople.filter(x => x.key !== target); target = people()[0].key; editor = null; recalc(); save(); } break;
             case 'close': panel.hidden = true; launch.focus(); return;
             case 'flip': back = !back; break;
-            case 'injury': { const text = panel.querySelector('#qh-injury').value.trim(); if (!text) throw new Error('Опишите повреждение.'); if (p.injuries.length >= 60) throw new Error('Лимит 60 повреждений.'); addOperation({ type: 'injury', who: target, id: uid(), zone, text, severity: panel.querySelector('#qh-severity').value }, 'Добавлено повреждение'); break; }
-            case 'rule-add': { if (p.rules.length >= 30) throw new Error('Лимит 30 правил.'); const kind = panel.querySelector('#qh-rule-kind').value; editor = { kind: 'rule', value: kind === 'custom' ? { ...ruleFrom('migraine', uid()), kind: 'custom', name: 'Моё заболевание', symptom: '', triggers: [], rate: .01 } : ruleFrom(kind, uid()), isNew: true }; break; }
+            case 'injury': { const text = panel.querySelector('#qh-injury').value.trim(); if (!text) throw new Error('Опишите повреждение.'); if (p.injuries.length >= 60) throw new Error('Лимит 60 повреждений.'); addOperation({ type: 'injury', who: target, id: uid(), zone: panel.querySelector('#qh-zone').value, text, severity: panel.querySelector('#qh-severity').value }, 'Добавлено повреждение'); break; }
+            case 'rule-add': { if (p.rules.length >= 30) throw new Error('Лимит 30 правил.'); const kind = panel.querySelector('#qh-rule-kind').value; editor = { kind: 'rule', value: kind === 'custom' ? { ...ruleFrom('migraine', uid()), kind: 'custom', category: 'ordinary', duration: 7, name: '', symptom: '', triggers: [], rate: .01 } : ruleFrom(kind, uid()), isNew: true }; break; }
             case 'editor-cancel': editor = null; break;
             case 'editor-save': saveEditor(); break;
             case 'advance': { const days = clamp(panel.querySelector('[data-draft="advance"]').value, .01, 3650, 1); addOperation({ type: 'time', day: world.day + days }, `Прошло ${days} дней`); break; }
             case 'undo': { const last = record.manual.findLast(o => !o.disabled); if (last) { last.disabled = true; recalc(); save(); } break; }
-            case 'pregnancy-manual': { if (!(ageAt(p, world.day) >= 18)) throw new Error('Укажите взрослый возраст персонажа.'); const g = pregnancyAt(p, world.day); editor = { kind: 'pregnancy', weeks: g?.week || 4, days: g?.remainder || 0 }; break; }
+            case 'pregnancy-manual': { if (!(ageAt(p, world.day) >= 18)) throw new Error('Укажите взрослый возраст персонажа.'); const g = pregnancyAt(p, world.day); editor = { kind: 'pregnancy', weeks: g?.week ?? 4, days: g?.remainder || 0 }; break; }
             case 'pregnancy-end': if (confirm('Убрать беременность из текущего состояния? Запись можно отменить в журнале.')) patch({ pregnancy: { ...p.pregnancy, active: false, known: false } }, 'Завершена беременность вручную'); break;
             case 'exposure': if (!p.cycle.enabled || !p.pregnancy.enabled || !(ageAt(p, world.day) >= 18)) throw new Error('Включите цикл и игровой шанс; укажите взрослый возраст.'); else if (confirm('Учесть новый незащищённый эпизод с возможностью зачатия? Один эпизод добавляйте только один раз.')) addOperation({ type: 'exposure', who: target, id: uid(), unprotected: true, conceptionPossible: true }, 'Репродуктивный эпизод'); break;
-            case 'template': { const base = normalize(p); base.injuries = []; base.factors = {}; base.age = p.age === '' ? '' : String(ageAt(p, world.day)); base.ageDay = 0; base.pregnancy.active = false; base.pregnancy.known = false; base.exposureIds = []; base.cycle.startDay = 0; base.rules.forEach(r => { r.active = false; r.hazard = 0; r.episode = 0; r.recovered = 0; }); settings.profiles[target] = base; save(); notify('Постоянная база сохранена для новых чатов.'); break; }
+            case 'template': { const base = normalize(p); base.injuries = []; base.factors = {}; base.age = p.age === '' ? '' : String(ageAt(p, world.day)); base.ageDay = 0; base.pregnancy.active = false; base.pregnancy.known = false; base.exposureIds = []; base.cycle.startDay = 0; base.rules.forEach(r => { r.active = false; r.hazard = 0; r.episode = 0; r.recovered = 0; r.treatmentDay = -1; r.rollDay = -1; r.complicated = false; }); settings.profiles[target] = base; save(); notify('Постоянная база сохранена для новых чатов.'); break; }
             case 'sources': { const owner = target, story = record; busy = true; render(); try { const list = await sources(ctx(), person()?.card, bookChoice ? [bookChoice] : []); if (owner === target && story === record) { sourceList = list; chosenSources = new Set(list.map((_, i) => i)); proposals = []; candidatesOwner = owner; notify(`Источников: ${list.length}. Исключите записи о других персонажах.`); } } finally { busy = false; } break; }
             case 'ai-scan': await ai(false); return;
             case 'ai-genetics': await ai(true); return;
             case 'local-scan': proposals = sourceList.filter((_, i) => chosenSources.has(i)).flatMap(s => cardCandidates({ description: s.text }).map(text => ({ text, field: 'notes', source: s.label }))); candidatesOwner = target; notify(`Найдено ${proposals.length} фрагментов. Локальный поиск не понимает отрицания.`); break;
             case 'local-genetics': proposals = generateTraits().split('\n').map(text => ({ text, field: 'traits', source: 'Случайная мягкая черта · вымысел' })); candidatesOwner = target; break;
-            case 'reset-look': settings.theme = 'botanical'; settings.accent = ''; settings.fontSize = 14; settings.density = 'airy'; settings.position = null; positionLaunch(); save(); break;
+            case 'reset-look': settings.theme = 'botanical'; settings.accent = ''; settings.fontSize = 14; settings.density = 'compact'; settings.position = null; positionLaunch(); save(); break;
             case 'export': { const url = URL.createObjectURL(new Blob([JSON.stringify({ version: 2, name: person()?.name, day: world.day, profile: p }, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'health-profile.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); break; }
             case 'import': panel.querySelector('#qh-file').click(); return;
         }
@@ -149,15 +249,16 @@ function saveEditor() {
     if (editor.kind === 'pregnancy') { const days = clamp(value('#qh-weeks'), 0, 49) * 7 + clamp(value('#qh-extra-days'), 0, 6); patch({ pregnancy: { ...p.pregnancy, active: true, gestationDays: days, atDay: world.day } }, 'Беременность указана вручную'); }
     else {
         const r = clone(editor.value), duration = value('#qe-duration'); r.duration = duration === '' ? null : clamp(duration, .05, 3650, 7);
-        if (editor.kind === 'injury') { r.text = value('#qe-name').slice(0, 500); r.zone = value('#qe-zone'); patch({ injuries: p.injuries.map(i => i.id === r.id ? r : i) }, 'Исправлено повреждение'); }
-        else { r.name = value('#qe-name').slice(0, 120); r.symptom = value('#qe-symptom').slice(0, 500); r.category = value('#qe-category'); r.rate = clamp(value('#qe-rate'), 0, 1, .01); r.enabled = panel.querySelector('#qe-enabled').checked; r.triggers = [...panel.querySelectorAll('[data-trigger]:checked')].map(el => el.dataset.trigger); if (r.active) r.until = r.duration === null ? null : r.onset + r.duration; patch({ rules: editor.isNew ? [...p.rules, r] : p.rules.map(i => i.id === r.id ? r : i) }, 'Настроено правило заболевания'); }
+        if (editor.kind === 'injury') { r.text = value('#qe-name').slice(0, 500); r.zone = value('#qe-zone'); if (!r.text.trim()) throw new Error('Опишите повреждение.'); addOperation({ type: 'injuryEdit', who: target, injury: r.id, zone: r.zone, text: r.text, duration: r.duration }, 'Исправлено повреждение'); }
+        else { r.complication = value('#qe-complication').trim().slice(0, 120); r.complicationChance = clamp(value('#qe-complication-chance'), 0, 100, 0); r.name = value('#qe-name').trim().slice(0, 120); if (!r.name) throw new Error('Введите название заболевания.'); r.symptom = value('#qe-symptom').slice(0, 500); r.category = value('#qe-category'); r.rate = clamp(value('#qe-rate'), 0, 1, .01); r.triggers = [...panel.querySelectorAll('[data-trigger]:checked')].map(el => el.dataset.trigger); if (r.active && r.duration !== editor.value.duration) r.until = r.duration === null ? null : r.onset + r.duration; patch({ rules: editor.isNew ? [...p.rules, r] : p.rules.map(i => i.id === r.id ? r : i) }, 'Настроено правило заболевания'); }
     }
     editor = null;
 }
 function editField(el) {
     const path = el.dataset.field, p = current(); if (!path || !p) return;
-    const value = el.type === 'checkbox' ? el.checked : el.type === 'number' && el.value !== '' ? Number(el.value) : el.value;
+    const value = el.type === 'checkbox' ? el.checked : el.type === 'number' && el.value !== '' ? Number(el.value) - (path === 'cycle.startDay' ? 1 : 0) : el.value;
     const [top, child] = path.split('.'), partial = child ? { [top]: { ...p[top], [child]: value } } : { [top]: value };
+    if (el.tagName === 'TEXTAREA' && (child ? p[top][child] : p[top]) === value) return;
     if (top === 'age') partial.ageDay = world.day;
     patch(partial, `Правка: ${path}`, `field:${target}:${path}`);
 }
@@ -165,13 +266,13 @@ async function change(e) {
     const el = e.target;
     try {
         if (el.id === 'qh-person') { target = el.value; sourceList = []; proposals = []; editor = null; notice = ''; }
-        else if (el.id === 'qh-zone') zone = el.value;
+        else if (el.id === 'qh-zone') { zone = el.value; return; }
         else if (el.id === 'qh-book') { bookChoice = el.value; return; }
         else if (el.dataset.source !== undefined) { const i = Number(el.dataset.source); if (el.checked) chosenSources.add(i); else chosenSources.delete(i); return; }
         else if (el.dataset.proposalField !== undefined) { proposals[Number(el.dataset.proposalField)].field = el.value; return; }
         else if (el.dataset.field) { editField(el); if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'checkbox')) { notify('Сохранено'); return; } }
         else if (el.dataset.setting) { settings[el.dataset.setting] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value; settings.limit = clamp(settings.limit, 300, 6000, 1400); settings.sourceLimit = clamp(settings.sourceLimit, 1000, 30000, 12000); save(); syncPrompt(); }
-        else if (el.dataset.option) { record.options[el.dataset.option] = el.type === 'checkbox' ? el.checked : clamp(el.value, .1, 3, 1); if (el.dataset.option === 'autoEvents' && el.checked) record.options.autoTime = true; recalc(); save(); }
+        else if (el.dataset.option) { record.options[el.dataset.option] = el.type === 'checkbox' ? el.checked : clamp(el.value, .1, 3, 1); recalc(); save(); }
         else if (el.id === 'qh-file') {
             const file = el.files[0], owner = target, story = record; if (!file) return;
             if (file.size > 200000) throw new Error('Лимит файла 200 КБ.');
@@ -223,17 +324,19 @@ async function init() {
     if (!ctx()?.extensionSettings || document.getElementById('qh-panel')) return;
     if (!demo) { try { scriptModule = await import('../../../../script.js'); } catch { /* Fallback to persona name on older versions. */ } }
     settings = ctx().extensionSettings[KEY] ||= {};
-    for (const [k, v] of Object.entries({ profiles: {}, theme: 'botanical', accent: '', fontSize: 14, density: 'airy', connection: '', enabled: false, limit: 1400, sourceLimit: 12000, position: null })) if (settings[k] === undefined) settings[k] = v;
+    for (const [k, v] of Object.entries({ profiles: {}, genomes: {}, theme: 'botanical', accent: '', fontSize: 14, density: 'compact', connection: '', enabled: false, limit: 1400, sourceLimit: 12000, position: null })) if (settings[k] === undefined) settings[k] = v;
     if (!loadStory()) return;
     panel = document.createElement('section'); panel.id = 'qh-panel'; panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Досье здоровья'); document.body.append(panel);
     panel.addEventListener('click', click); panel.addEventListener('change', change);
     panel.addEventListener('focusout', () => setTimeout(fitViewport, 180));
-    panel.addEventListener('input', e => { if (e.target.dataset.proposal !== undefined) proposals[Number(e.target.dataset.proposal)].text = e.target.value; if (e.target.dataset.field && e.target.tagName === 'TEXTAREA') editField(e.target); });
+    panel.addEventListener('toggle', e => { if (e.target.open) e.target.querySelectorAll('textarea').forEach(fitText); }, true);
+    addEventListener('resize', () => panel.querySelectorAll('textarea').forEach(fitText));
+    panel.addEventListener('input', e => { if (e.target.tagName === 'TEXTAREA') fitText(e.target); if (e.target.dataset.proposal !== undefined) proposals[Number(e.target.dataset.proposal)].text = e.target.value; if (e.target.dataset.field && e.target.tagName === 'TEXTAREA') editField(e.target); });
     panel.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; launch.focus(); } if (e.target.dataset.zone && ['Enter', ' '].includes(e.key)) { e.preventDefault(); zone = e.target.dataset.zone; render(); panel.querySelector(`[data-zone="${zone}"]`)?.focus(); } });
     launch = document.createElement('button'); launch.id = 'qh-launch'; launch.title = 'Досье здоровья · перемещение мышью, пальцем или Alt + стрелки'; launch.setAttribute('aria-label', 'Открыть досье здоровья'); launch.innerHTML = '<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 33C15 29 5 22 5 14C5 5 16 4 20 11C24 4 35 5 35 14C35 22 25 29 20 33Z" fill="currentColor"/><g transform="rotate(-35 20 20)"><rect x="9" y="15" width="23" height="10" rx="3" fill="#f3ead7" stroke="#43554a"/><path d="M17 16v8m7-8v8" stroke="#788576"/><circle cx="13" cy="20" r="1" fill="#788576"/><circle cx="28" cy="20" r="1" fill="#788576"/></g></svg>'; document.body.append(launch); positionLaunch(); setupDrag();
     const c = ctx(), events = c.eventTypes || c.event_types || {};
     for (const name of ['CHAT_CHANGED', 'CHARACTER_EDITED', 'USER_NAME_CHANGED', 'PERSONA_CHANGED']) if (events[name]) c.eventSource?.on(events[name], () => { sourceList = []; proposals = []; editor = null; notice = ''; loadStory(); if (!panel.hidden) render(); });
-    for (const name of ['CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED']) if (events[name]) c.eventSource?.on(events[name], () => { loadStory(); save(); if (!panel.hidden) render(); });
+    for (const name of ['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED', 'MESSAGE_SENT', 'USER_MESSAGE_RENDERED', 'MESSAGE_EDITED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED']) if (events[name]) c.eventSource?.on(events[name], () => { loadStory(); save(); if (!panel.hidden) render(); });
     if (events.GENERATION_AFTER_COMMANDS) c.eventSource?.on(events.GENERATION_AFTER_COMMANDS, () => loadStory());
     fitViewport(); save(); if (demo) { panel.hidden = false; render(); }
 }

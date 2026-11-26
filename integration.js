@@ -1,3 +1,5 @@
+import { RULES } from './engine.js';
+
 export function profiles(ctx) { return (ctx.extensionSettings?.connectionManager?.profiles || []).map(p => ({ id: p.id, name: p.name })); }
 export async function requestJSON(ctx, profileId, instruction, data) {
     if (!profileId || !profiles(ctx).some(p => p.id === profileId)) throw new Error('Выберите сохранённый профиль подключения в настройках расширения.');
@@ -25,5 +27,5 @@ export async function sources(ctx, card, bookNames = []) {
 }
 export function validateCandidates(data, allowedSources, generated = false) {
     if (!Array.isArray(data?.items)) throw new Error('Модель вернула неверный формат списка.');
-    return data.items.slice(0, 20).filter(x => x && ['conditions', 'allergies', 'traits', 'notes'].includes(x.field) && typeof x.text === 'string' && x.text.trim()).map(x => ({ field: generated ? 'traits' : x.field, text: x.text.slice(0, 1000), source: generated ? 'Игровая генерация · предположение' : allowedSources.find(s => s.id === x.source)?.label || 'Источник не подтверждён — проверьте', rule: ['migraine', 'asthma', 'allergy', 'cold', 'stroke', 'serious'].includes(x.rule) ? x.rule : '' }));
+    return data.items.slice(0, 20).filter(x => x && ['conditions', 'allergies', 'intolerances', 'traits', 'notes'].includes(x.field) && typeof x.text === 'string' && x.text.trim()).map(x => ({ field: generated ? 'traits' : x.field, text: x.text.slice(0, 1000), source: generated ? 'Игровая генерация · предположение' : allowedSources.find(s => s.id === x.source)?.label || 'Источник не подтверждён — проверьте', rule: Object.hasOwn(RULES, x.rule) ? x.rule : '' }));
 }
