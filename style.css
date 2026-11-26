@@ -57,6 +57,15 @@
 #qh-panel .qh-cycle-strip .qh-check { margin-bottom: 6px; }
 
 #qh-panel .qh-status:empty { display: none; }
+#qh-panel .qh-connections summary, #qh-panel .qh-connections button {
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 10px;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+#qh-panel .qh-connections button { width: 100%; text-align: start; white-space: normal; }
+#qh-panel .qh-connections button[aria-pressed=true] { border-color: var(--qh-accent); }
 #qh-panel .qh-blank-fields { margin: 4px 0 8px; }
 #qh-panel .qh-blank-fields summary { color: var(--qh-pen); cursor: pointer; padding-block: 5px; }
 #qh-panel .qh-illness-link button { padding: 3px 0; border: 0; color: var(--qh-pen); min-height: 28px; }

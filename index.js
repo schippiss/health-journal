@@ -1,7 +1,7 @@
 import { freshProfile, normalize, ruleFrom, clone, clamp, replay, applyEvent, pregnancyAt, ageAt, summary, inheritedRisk, randomAt, GENETIC_TRAITS, FACTORS, ZONES } from './engine.js';
 import { sources, requestJSON, validateCandidates } from './integration.js';
 import { cardCandidates, generateTraits } from './core.js';
-import { view } from './views.js';
+import { view, connectionOptions } from './views.js';
 
 const KEY = 'quietHealthJournal', PROMPT = 'quiet_health_journal', CLOCK = 'quiet_health_clock';
 const demo = !globalThis.SillyTavern && new URLSearchParams(location.search).has('demo');
@@ -169,6 +169,13 @@ async function click(e) {
         if (el.dataset.person) { target = el.dataset.person; sourceList = []; proposals = []; editor = null; notice = ''; render(); return; }
         if (el.dataset.zone) { zone = el.dataset.zone; render(); const form = panel.querySelector('.qh-injury-form'); if (form) form.open = true; return; }
         if (el.dataset.theme) { settings.theme = el.dataset.theme; settings.accent = ''; save(); render(); return; }
+        if (el.dataset.connectionId !== undefined) {
+            settings.connection = el.dataset.connectionId;
+            save();
+            render();
+            panel.querySelector('.qh-connections summary')?.focus({ preventScroll: true });
+            return;
+        }
         const p = current(); if (!p) return;
         if (el.dataset.heal) { const injury = p.injuries.find(i => i.id === el.dataset.heal); addOperation({ type: 'injuryEdit', who: target, injury: injury.id, healed: !injury.healed }, 'Изменено заживление'); }
         if (el.dataset.removeInjury) addOperation({ type: 'injuryEdit', who: target, injury: el.dataset.removeInjury, remove: true }, 'Удалено повреждение');
@@ -329,7 +336,13 @@ async function init() {
     panel = document.createElement('section'); panel.id = 'qh-panel'; panel.hidden = true; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Досье здоровья'); document.body.append(panel);
     panel.addEventListener('click', click); panel.addEventListener('change', change);
     panel.addEventListener('focusout', () => setTimeout(fitViewport, 180));
-    panel.addEventListener('toggle', e => { if (e.target.open) e.target.querySelectorAll('textarea').forEach(fitText); }, true);
+    panel.addEventListener('toggle', e => {
+        if (!e.target.open) return;
+        if (e.target.matches('.qh-connections')) {
+            e.target.querySelector('div').innerHTML = connectionOptions(ctx(), settings.connection);
+        }
+        e.target.querySelectorAll('textarea').forEach(fitText);
+    }, true);
     addEventListener('resize', () => panel.querySelectorAll('textarea').forEach(fitText));
     panel.addEventListener('input', e => { if (e.target.tagName === 'TEXTAREA') fitText(e.target); if (e.target.dataset.proposal !== undefined) proposals[Number(e.target.dataset.proposal)].text = e.target.value; if (e.target.dataset.field && e.target.tagName === 'TEXTAREA') editField(e.target); });
     panel.addEventListener('keydown', e => { if (e.key === 'Escape') { panel.hidden = true; launch.focus(); } if (e.target.dataset.zone && ['Enter', ' '].includes(e.key)) { e.preventDefault(); zone = e.target.dataset.zone; render(); panel.querySelector(`[data-zone="${zone}"]`)?.focus(); } });
